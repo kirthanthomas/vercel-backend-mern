@@ -1,0 +1,72 @@
+const express = require("express");
+const mongoose = require("mongoose");
+const cors = require("cors");
+const helmet = require("helmet");
+const { randomBytes } = require("node:crypto");
+const { rateLimit } = require("express-rate-limit");
+require("dotenv").config();
+
+const authRoutes = require("./routes/auth");
+const ideaRoutes = require("./routes/ideas");
+
+const app = express();
+const port = Number(process.env.PORT || 5000);
+const isProduction = process.env.NODE_ENV === "production";
+
+if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error("PORT must be a valid port number");
+if (!process.env.MONGO_URI) throw new Error("MONGO_URI is required to start the API");
+if (!process.env.JWT_SECRET) {
+    if (isProduction) throw new Error("JWT_SECRET must be configured in production");
+    process.env.JWT_SECRET = randomBytes(32).toString("hex");
+    console.warn("JWT_SECRET is not set; a temporary development-only secret is being used.");
+}
+if (Buffer.byteLength(process.env.JWT_SECRET, "utf8") < 32) throw new Error("JWT_SECRET must be at least 32 bytes long");
+
+app.disable("x-powered-by");
+app.use(helmet());
+const configuredOrigins = (process.env.CLIENT_ORIGIN || (isProduction ? "" : "http://localhost:5173,http://127.0.0.1:5173,http://localhost:4173"))
+    .split(",").map((origin) => origin.trim()).filter(Boolean);
+const createRateLimiter = (limit) => rateLimit({
+    windowMs: 15 * 60 * 1000,
+    limit,
+    standardHeaders: "draft-8",
+    legacyHeaders: false,
+    handler: (req, res) => res.status(429).json({ message: "Too many requests. Please try again later." })
+});
+app.use(cors({
+    origin(origin, callback) {
+        if (!origin || configuredOrigins.includes(origin)) return callback(null, true);
+        return callback(new Error("Origin is not allowed by CORS"));
+    }
+}));
+app.use(express.json({ limit: "32kb" }));
+app.use(createRateLimiter(300));
+app.use("/api/auth", createRateLimiter(12));
+app.use("/api/auth", authRoutes);
+app.use("/api/ideas", ideaRoutes);
+app.get("/api/health", (req, res) => res.json({ status: "ok", database: mongoose.connection.readyState === 1 ? "connected" : "disconnected" }));
+app.use((req, res) => res.status(404).json({ message: "API route not found" }));
+
+app.use((error, req, res, next) => {
+    if (res.headersSent) return next(error);
+    if (error instanceof SyntaxError && error.status === 400 && "body" in error) return res.status(400).json({ message: "Request body contains invalid JSON" });
+    if (error.type === "entity.too.large") return res.status(413).json({ message: "Request body is too large" });
+    if (error.message === "Origin is not allowed by CORS") return res.status(403).json({ message: "This website origin is not allowed" });
+    if (error.name === "ValidationError") return res.status(400).json({ message: "Request validation failed", errors: Object.values(error.errors).map((item) => item.message) });
+    if (error.name === "CastError") return res.status(400).json({ message: "Invalid value provided" });
+    if (error.code === 11000) return res.status(409).json({ message: "A record with these details already exists" });
+    console.error("Unhandled API error:", error);
+    return res.status(500).json({ message: "An unexpected server error occurred" });
+});
+
+mongoose.connect(process.env.MONGO_URI)
+    .then(() => {
+        console.log("MongoDB Connected");
+        app.listen(port, () => console.log(`Server running on port ${port}`));
+    })
+    .catch((error) => {
+        console.error("MongoDB Connection Error:", error.message);
+        process.exitCode = 1;
+    });
+
+module.exports = app;
