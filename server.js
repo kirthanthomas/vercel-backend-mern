@@ -22,10 +22,26 @@ if (!process.env.JWT_SECRET) {
 }
 if (Buffer.byteLength(process.env.JWT_SECRET, "utf8") < 32) throw new Error("JWT_SECRET must be at least 32 bytes long");
 
+// Maintain cached MongoDB connection for serverless cold-starts
+let isConnected = false;
+const connectDB = async () => {
+    if (isConnected) return;
+    try {
+        const db = await mongoose.connect(process.env.MONGO_URI);
+        isConnected = db.connections[0].readyState === 1;
+        console.log("MongoDB Connected");
+    } catch (error) {
+        console.error("MongoDB Connection Error:", error.message);
+    }
+};
+connectDB();
+
 app.disable("x-powered-by");
 app.use(helmet());
+
 const configuredOrigins = (process.env.CLIENT_ORIGIN || (isProduction ? "" : "http://localhost:5173,http://127.0.0.1:5173,http://localhost:4173"))
     .split(",").map((origin) => origin.trim()).filter(Boolean);
+
 const createRateLimiter = (limit) => rateLimit({
     windowMs: 15 * 60 * 1000,
     limit,
@@ -33,20 +49,39 @@ const createRateLimiter = (limit) => rateLimit({
     legacyHeaders: false,
     handler: (req, res) => res.status(429).json({ message: "Too many requests. Please try again later." })
 });
+
 app.use(cors({
     origin(origin, callback) {
         if (!origin || configuredOrigins.includes(origin)) return callback(null, true);
         return callback(new Error("Origin is not allowed by CORS"));
     }
 }));
+
 app.use(express.json({ limit: "32kb" }));
 app.use(createRateLimiter(300));
+
+// Root route
+app.get("/", (req, res) => {
+    res.json({
+        status: "ok",
+        message: "Server is running",
+        database: mongoose.connection.readyState === 1 ? "connected" : "disconnected"
+    });
+});
+
+// API Routes
 app.use("/api/auth", createRateLimiter(12));
 app.use("/api/auth", authRoutes);
 app.use("/api/ideas", ideaRoutes);
-app.get("/api/health", (req, res) => res.json({ status: "ok", database: mongoose.connection.readyState === 1 ? "connected" : "disconnected" }));
+app.get("/api/health", (req, res) => res.json({ 
+    status: "ok", 
+    database: mongoose.connection.readyState === 1 ? "connected" : "disconnected" 
+}));
+
+// 404 Handler
 app.use((req, res) => res.status(404).json({ message: "API route not found" }));
 
+// Error handling middleware
 app.use((error, req, res, next) => {
     if (res.headersSent) return next(error);
     if (error instanceof SyntaxError && error.status === 400 && "body" in error) return res.status(400).json({ message: "Request body contains invalid JSON" });
@@ -59,14 +94,9 @@ app.use((error, req, res, next) => {
     return res.status(500).json({ message: "An unexpected server error occurred" });
 });
 
-mongoose.connect(process.env.MONGO_URI)
-    .then(() => {
-        console.log("MongoDB Connected");
-        app.listen(port, () => console.log(`Server running on port ${port}`));
-    })
-    .catch((error) => {
-        console.error("MongoDB Connection Error:", error.message);
-        process.exitCode = 1;
-    });
+// Run app.listen only when running locally (not in serverless/Vercel)
+if (process.env.NODE_ENV !== "production") {
+    app.listen(port, () => console.log(`Server running on port ${port}`));
+}
 
 module.exports = app;
