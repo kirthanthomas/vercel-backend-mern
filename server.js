@@ -1,3 +1,5 @@
+const dns = require('node:dns');
+dns.setServers(['8.8.8.8', '8.8.4.4']);
 const express = require("express");
 const mongoose = require("mongoose");
 const cors = require("cors");
@@ -23,17 +25,28 @@ if (!process.env.JWT_SECRET) {
 if (Buffer.byteLength(process.env.JWT_SECRET, "utf8") < 32) throw new Error("JWT_SECRET must be at least 32 bytes long");
 
 // Maintain cached MongoDB connection for serverless cold-starts
+// MongoDB connection
 let isConnected = false;
+
 const connectDB = async () => {
-    if (isConnected) return;
+    if (mongoose.connection.readyState === 1) {
+        isConnected = true;
+        return;
+    }
+
     try {
-        const db = await mongoose.connect(process.env.MONGO_URI);
-        isConnected = db.connections[0].readyState === 1;
-        console.log("MongoDB Connected");
+        await mongoose.connect(process.env.MONGO_URI, {
+            serverSelectionTimeoutMS: 10000
+        });
+
+        isConnected = true;
+        console.log("MongoDB Atlas connected successfully!");
     } catch (error) {
-        console.error("MongoDB Connection Error:", error.message);
+        isConnected = false;
+        console.error("MongoDB connection failed:", error.message);
     }
 };
+
 connectDB();
 
 app.disable("x-powered-by");
@@ -51,12 +64,15 @@ const createRateLimiter = (limit) => rateLimit({
 });
 
 app.use(cors({
-    origin(origin, callback) {
-        if (!origin || configuredOrigins.includes(origin)) return callback(null, true);
-        return callback(new Error("Origin is not allowed by CORS"));
-    }
+    origin: [
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        "http://localhost:4173"
+    ],
+    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "Authorization"],
+    credentials: true
 }));
-
 app.use(express.json({ limit: "32kb" }));
 app.use(createRateLimiter(300));
 
