@@ -26,28 +26,28 @@ if (Buffer.byteLength(process.env.JWT_SECRET, "utf8") < 32) throw new Error("JWT
 
 // Maintain cached MongoDB connection for serverless cold-starts
 // MongoDB connection
-let isConnected = false;
+// MongoDB connection with serverless connection caching
+let connectionPromise = null;
 
 const connectDB = async () => {
     if (mongoose.connection.readyState === 1) {
-        isConnected = true;
         return;
     }
 
-    try {
-        await mongoose.connect(process.env.MONGO_URI, {
+    if (!connectionPromise) {
+        connectionPromise = mongoose.connect(process.env.MONGO_URI, {
             serverSelectionTimeoutMS: 10000
+        }).then(() => {
+            console.log("MongoDB Atlas connected successfully!");
+        }).catch((error) => {
+            connectionPromise = null;
+            console.error("MongoDB connection failed:", error.message);
+            throw error;
         });
-
-        isConnected = true;
-        console.log("MongoDB Atlas connected successfully!");
-    } catch (error) {
-        isConnected = false;
-        console.error("MongoDB connection failed:", error.message);
     }
-};
 
-connectDB();
+    return connectionPromise;
+};
 
 app.disable("x-powered-by");
 app.use(helmet());
@@ -64,11 +64,7 @@ const createRateLimiter = (limit) => rateLimit({
 });
 
 app.use(cors({
-    origin: [
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-        "http://localhost:4173"
-    ],
+    origin: configuredOrigins,
     methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allowedHeaders: ["Content-Type", "Authorization"],
     credentials: true
@@ -86,8 +82,32 @@ app.get("/", (req, res) => {
 });
 
 // API Routes
+// API Routes
+app.use("/api/auth", async (req, res, next) => {
+    try {
+        await connectDB();
+        next();
+    } catch (error) {
+        return res.status(503).json({
+            message: "Database connection failed. Please try again later."
+        });
+    }
+});
+
 app.use("/api/auth", createRateLimiter(12));
 app.use("/api/auth", authRoutes);
+
+app.use("/api/ideas", async (req, res, next) => {
+    try {
+        await connectDB();
+        next();
+    } catch (error) {
+        return res.status(503).json({
+            message: "Database connection failed. Please try again later."
+        });
+    }
+});
+
 app.use("/api/ideas", ideaRoutes);
 app.get("/api/health", (req, res) => res.json({ 
     status: "ok", 
